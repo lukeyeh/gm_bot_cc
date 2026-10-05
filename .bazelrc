@@ -1,0 +1,62 @@
+build --cxxopt=-std=c++20
+build --host_cxxopt=-std=c++20
+
+# Nothing here throws: failures travel as absl::Status.
+build --cxxopt=-fno-exceptions
+# Clang still suggests that coroutine types declare a handler for exceptions
+# in case the code is ever built with them enabled. It will not be.
+build --cxxopt=-Wno-coroutine-missing-unhandled-exception
+
+# Header-parsing actions have no source file, which crashes the
+# compile_commands.json generator.
+build --features=-parse_headers
+build --host_features=-parse_headers
+
+# Link this repository's own libraries into each binary statically. Left to
+# itself Bazel builds them as shared libraries for tests, and a shared library
+# cannot contain the static libraries from Nix that it depends on.
+build --dynamic_mode=off
+
+test --test_output=errors
+
+# `bazel test --config=epoll //...` runs every test on the epoll I/O backend
+# instead of the default, which is io_uring where the system allows it.
+test:epoll --test_arg=--io_backend=epoll
+
+# Fuzzing. `bazel test` already tries every FUZZ_TEST on random inputs for a
+# moment. To search in earnest, build with --config=fuzz, which has the
+# compiler report which code each input reaches so that FuzzTest can steer
+# towards inputs that reach more, and say which test and for how long:
+#
+#   bazel run --config=fuzz //gm:ledger_fuzz_test -- \
+#       --fuzz=LedgerFuzzTest.AgreesWithTheModel --fuzz_for=60s
+build:fuzz --copt=-fsanitize-coverage=inline-8bit-counters
+build:fuzz --copt=-fsanitize-coverage=trace-cmp
+build:fuzz --copt=-g
+
+# Profiling. `--config=profile` is an optimised build that keeps what a
+# profiler needs to name functions and walk the stack.
+build:profile --compilation_mode=opt
+build:profile --copt=-g
+build:profile --copt=-fno-omit-frame-pointer
+build:profile --strip=never
+
+# `bazel run --config=flamegraph //some:target` runs it under perf and writes
+# /tmp/flamegraph.svg.
+#
+# The output paths here are fixed rather than relative to where bazel was run
+# from, because bazel runs tests, unlike binaries, without a shell that could
+# work that directory out. They are outside the repository, so nothing
+# profiling writes can be committed by accident.
+run:flamegraph --config=profile
+# Lets a test target find `flamegraph`, which comes from the Nix shell. Bazel
+# runs tests with a minimal PATH otherwise.
+run:flamegraph --test_env=PATH
+run:flamegraph --run_under='flamegraph -o /tmp/flamegraph.svg --'
+
+# `bazel run --config=record //some:target` runs it under perf and writes the
+# recording to /tmp/perf.data, for viewing with `samply import /tmp/perf.data`
+# or `pprof -http=localhost:8000 /tmp/perf.data`.
+run:record --config=profile
+run:record --test_env=PATH
+run:record --run_under='perf record -g -o /tmp/perf.data --'

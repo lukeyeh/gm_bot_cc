@@ -1,0 +1,22 @@
+# Run with: bazel run :compile_commands && clang-tidy main.cc */*.cc
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  performance-*,
+  misc-const-correctness,
+  misc-unused-using-decls,
+  misc-include-cleaner,
+  google-explicit-constructor,
+  google-build-using-namespace,
+  google-readability-casting,
+  readability-container-size-empty,
+  readability-redundant-string-init,
+  readability-redundant-smartptr-get,
+  cppcoreguidelines-avoid-capturing-lambda-coroutines,
+HeaderFilterRegex: '^(async|os|net|http|websocket|json|sqlite|discord|gm|bot)/'
+CheckOptions:
+  # System, liburing and OpenSSL headers pull their declarations from internal
+  # sub-headers that should not be included directly.
+  misc-include-cleaner.IgnoreHeaders: 'liburing/.*;openssl/.*;linux/.*;bits/.*;asm.*;sys/.*'

@@ -1,0 +1,2 @@
+# direnv keeps a copy of the flake's inputs here, BUILD files and all.
+.direnv

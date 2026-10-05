@@ -1,0 +1,3 @@
+BasedOnStyle: Google
+# Keeps lookup tables written as a switch to one line per entry.
+AllowShortCaseLabelsOnASingleLine: true

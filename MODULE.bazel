@@ -1,0 +1,195 @@
+module(name = "gm_bot")
+
+bazel_dep(name = "rules_cc", version = "0.2.26")
+
+# Third-party libraries come from nixpkgs, not from the Bazel registry, so
+# that Bazel builds against exactly the libraries the Nix package is built
+# against. nix/deps.nix says which libraries; flake.lock pins their versions.
+bazel_dep(name = "rules_nixpkgs_core", version = "0.14.0")
+
+# The nixpkgs that flake.lock pins, as <nixpkgs> for the files below.
+nix_repo = use_extension("@rules_nixpkgs_core//extensions:repository.bzl", "nix_repo")
+nix_repo.flake(
+    name = "nixpkgs",
+    lock_file = "//:flake.lock",
+)
+use_repo(nix_repo, "nixpkgs")
+
+# One external repository per library, each holding a single cc_library named
+# after it. Depend on them as "@abseil-cpp", "@liburing", "@openssl", "@sqlite", "@gtest"
+# and "@gbenchmark".
+#
+# The BUILD files below load rules_cc by its canonical name, "@@rules_cc+",
+# because they are evaluated inside repositories that rules_nixpkgs creates,
+# where the short name "@rules_cc" is not known.
+#
+# Shared libraries are listed by the file name the dynamic linker will look
+# for (libfoo.so.1), not the bare libfoo.so, so that Bazel sets the binary up
+# to find them at run time.
+nix_pkg = use_extension("@rules_nixpkgs_core//extensions:package.bzl", "nix_pkg")
+nix_pkg.file(
+    name = "abseil-cpp",
+    attr = "abseil-cpp",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+# All of Abseil as one library.
+cc_library(
+    name = "abseil-cpp",
+    srcs = glob(["lib/libabsl_*.so.*"]),
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "fuzztest",
+    attr = "fuzztest",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+# FuzzTest: the FUZZ_TEST macro and the domains that describe inputs. A test
+# using it also depends on "@gtest" and "@abseil-cpp", which this was built
+# against. RE2, which its headers need, comes with it.
+cc_library(
+    name = "fuzztest",
+    testonly = True,
+    srcs = ["lib/libfuzztest.a"] + glob(["lib/libre2.so.*"]),
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+
+# The main() for a test binary that holds fuzz tests.
+cc_library(
+    name = "main",
+    testonly = True,
+    srcs = ["lib/libfuzztest_gtest_main.a"],
+    visibility = ["//visibility:public"],
+    deps = [":fuzztest"],
+    alwayslink = True,
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = [
+        "//nix:deps.nix",
+        "//nix:fuzztest.nix",
+    ],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "gtest",
+    attr = "gtest",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+# GoogleTest and GoogleMock, without their main functions: tests here link
+# //testing:main instead.
+cc_library(
+    name = "gtest",
+    testonly = True,
+    srcs = glob([
+        "lib/libgtest.so.*",
+        "lib/libgmock.so.*",
+    ]),
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "gbenchmark",
+    attr = "gbenchmark",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "gbenchmark",
+    testonly = True,
+    srcs = ["lib/libbenchmark.a"],
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    linkopts = ["-pthread"],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "liburing",
+    attr = "liburing",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "liburing",
+    srcs = ["lib/liburing.so.2"],
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "openssl",
+    attr = "openssl",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+# TLS (libssl) and the cryptography under it (libcrypto).
+cc_library(
+    name = "openssl",
+    srcs = [
+        "lib/libcrypto.so.3",
+        "lib/libssl.so.3",
+    ],
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+nix_pkg.file(
+    name = "sqlite",
+    attr = "sqlite",
+    build_file_content = """\
+load("@@rules_cc+//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "sqlite",
+    srcs = ["lib/libsqlite3.a"],
+    hdrs = glob(["include/**"]),
+    includes = ["include"],
+    linkopts = [
+        "-ldl",
+        "-lm",
+        "-pthread",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+    file = "//nix:bazel.nix",
+    file_deps = ["//nix:deps.nix"],
+    repo = "@nixpkgs",
+)
+use_repo(nix_pkg, "abseil-cpp", "fuzztest", "gbenchmark", "gtest", "liburing", "openssl", "sqlite")
+
+# Generates compile_commands.json for clangd: `bazel run :compile_commands`
+# https://github.com/wolfd/bazel-compile-commands
+bazel_dep(name = "wolfd_bazel_compile_commands", version = "0.5.2", dev_dependency = True)
