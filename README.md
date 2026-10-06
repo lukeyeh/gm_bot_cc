@@ -4,8 +4,13 @@ A fast Discord bot that tracks daily "GM" streaks.
 
 With its ledger on disk it handles about **11,600 events a second** on one
 thread, answers a GM in about **a third of a millisecond**, starts in 10 ms
-and runs in about 20 MB. It is written in C++20 from the socket up: its own
-Discord client, WebSocket, HTTP, TLS layering and JSON, on io_uring.
+and runs in about 20 MB. It is written in C++20 from the socket up, on
+io_uring.
+
+It is built on [bedrock](https://github.com/lukeyeh/bedrock), a set of C++
+libraries that provides everything under the bot itself: coroutines, the
+event loop, TCP and TLS, HTTP, WebSocket, JSON, SQLite and the Discord
+client.
 
 ## What it does
 
