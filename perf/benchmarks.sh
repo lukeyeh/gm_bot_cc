@@ -3,7 +3,7 @@
 # each test binary under perf-reports/raw/<label>/. Run inside `nix develop`.
 #
 #   perf/benchmarks.sh baseline
-#   perf/benchmarks.sh after "//gm:ledger_test //json:json_test"
+#   perf/benchmarks.sh after "//gm:ledger_test //gm:phrase_test"
 set -euo pipefail
 label=${1:?usage: run_benchmarks.sh <label> [targets]}
 targets=${2:-$(bazel query 'kind(cc_test, //...) except attr(name, "_fuzz_test$", //...)' 2>/dev/null)}

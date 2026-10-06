@@ -3,9 +3,17 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+
+    # The libraries the bot is built on. Not used as a flake: nix/deps.nix
+    # builds it from the revision flake.lock pins here, with this project's
+    # compiler. `nix flake update bedrock` moves to its latest revision.
+    bedrock = {
+      url = "github:lukeyeh/bedrock";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, ... }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -20,7 +28,7 @@
         default = pkgs.callPackage ./nix/package.nix {
           stdenv = (llvmFor pkgs).stdenv;
           # The same libraries Bazel builds against.
-          inherit (import ./nix/deps.nix pkgs) abseil-cpp liburing openssl sqlite;
+          inherit (import ./nix/deps.nix pkgs) bedrock;
         };
       });
 

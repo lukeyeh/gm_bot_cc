@@ -85,34 +85,39 @@ sockets. The ledger was 200 times slower before those pointed at it.
 
 ## Architecture
 
-Each directory is a layer and a Bazel package. Dependencies point downwards
-only, and Bazel `visibility` enforces it.
+The bot itself is two packages here. Everything under them (coroutines,
+networking, HTTP, WebSocket, JSON, SQLite and the Discord client) is
+[bedrock](https://github.com/lukeyeh/bedrock), a separate repository of
+libraries that this one imports through Nix. Dependencies point downwards
+only.
 
 ```
 main.cc
   bot/          the bot: configuration, and the loop joining the two below
-  ├─ discord/   Discord, as a bot sees it: connect, next event, send, react
-  │  ├─ http/        an HTTP/1.1 client
-  │  ├─ websocket/   WebSocket connections
-  │  │  └─ net/      byte streams: TCP, TLS, buffered reading, the event loop
-  │  │     └─ os/    the kernel: sockets, io_uring, epoll
-  │  └─ json/        JSON values
-  └─ gm/        who said GM when, and the streaks that follow
-     └─ sqlite/      SQLite databases
-  async/        Task, Sequence, Awaitable, TaskScope: used by everything that
-                waits
+  ├─ gm/        who said GM when, and the streaks that follow
+  │  └─ bedrock sqlite     SQLite databases
+  └─ bedrock discord       Discord, as a bot sees it: connect, next event,
+     │                     send, react
+     ├─ bedrock http       an HTTP/1.1 client
+     ├─ bedrock websocket  WebSocket connections
+     │  └─ bedrock net     byte streams: TCP, TLS, buffered reading, the
+     │     │               event loop
+     │     └─ bedrock os   the kernel: sockets, io_uring, epoll
+     └─ bedrock json       JSON values
+  bedrock async            Task, Sequence, Awaitable, TaskScope: used by
+                           everything that waits
   perf/         load tests
 ```
 
 Two rules shape it:
 
-- **Only `os/` talks to the kernel**, and only `async/` touches the C++
-  coroutine machinery. Everything else is written in terms of `Task<T>`
+- **Only bedrock's `os/` talks to the kernel**, and only its `async/`
+  touches the C++ coroutine machinery. Everything else is written in terms of `Task<T>`
   (an asynchronous function with one result), `Sequence<T>` (one that hands
   out many, keeping its place in between), `co_await`, and the classes those
   two packages export.
 - **Each format or protocol is known in one place.** Discord's JSON field
-  names are in `discord/wire.cc`; the gateway's opcodes and reconnection
+  names are in bedrock's `discord/wire.cc`; the gateway's opcodes and reconnection
   rules in `discord/gateway.cc`; WebSocket framing in `websocket/`; SQL in
   `gm/ledger.cc`.
 
@@ -156,7 +161,8 @@ with the record, and nothing has to run at midnight for a streak to end.
 
 ## Tests
 
-34 test targets, 281 tests. Every `foo.h` / `foo.cc` has a `foo_test.cc`
+11 test targets and 125 tests here, and another 27 targets in bedrock for
+the libraries. Every `foo.h` / `foo.cc` has a `foo_test.cc`
 beside it, written to be read: each opens by saying what it demonstrates,
 and each test says what behaviour it shows.
 
@@ -296,9 +302,18 @@ headers.
 
 ## Libraries
 
-Third-party libraries come from nixpkgs, at the versions `flake.lock` pins.
-`nix/deps.nix` is the one list of them (Abseil, liburing, OpenSSL, SQLite,
-and GoogleTest, Google Benchmark and FuzzTest for tests), used by both builds:
+Libraries come through Nix, at the versions `flake.lock` pins. `nix/deps.nix`
+is the one list of them, used by both builds:
+
+- [bedrock](https://github.com/lukeyeh/bedrock), from its own repository. It
+  is an input of the flake, so `flake.lock` pins a revision, and it is built
+  with this project's compiler and against this project's Abseil. BUILD
+  files depend on `"@bedrock//:discord"`, `"@bedrock//:sqlite"` and so on.
+  `nix flake update bedrock` moves to its latest revision.
+- Abseil, liburing, OpenSSL and SQLite from nixpkgs, and GoogleTest, Google
+  Benchmark and FuzzTest for tests.
+
+Both builds take them from that file:
 
 - Bazel imports them through
   [rules_nixpkgs](https://github.com/tweag/rules_nixpkgs), set up in

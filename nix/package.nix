@@ -1,7 +1,8 @@
 # The bot as a Nix package, for deployment.
 #
 # This compiles the same sources as `bazel build //:gm_bot`, against the same
-# libraries: both this package and Bazel take them from deps.nix. Only the
+# libraries, bedrock included: both this package and Bazel take them from
+# deps.nix. Only the
 # compiling itself is done twice over, here by Nix and in development by
 # Bazel, because Bazel inside a Nix build is fragile (it wants to download
 # things, which a Nix build may not).
@@ -12,10 +13,7 @@
 {
   lib,
   stdenv,
-  abseil-cpp,
-  liburing,
-  openssl,
-  sqlite,
+  bedrock,
   pkg-config,
 }:
 
@@ -29,32 +27,21 @@ stdenv.mkDerivation {
     root = ../.;
     fileset = lib.fileset.unions [
       ../main.cc
-      ../async
-      ../os
-      ../net
-      ../http
-      ../websocket
-      ../json
-      ../sqlite
-      ../discord
       ../gm
       ../bot
     ];
   };
 
   nativeBuildInputs = [ pkg-config ];
-  buildInputs = [
-    abseil-cpp
-    liburing
-    openssl
-    sqlite
-  ];
+  # Bedrock brings Abseil, liburing, OpenSSL and SQLite with it.
+  buildInputs = [ bedrock ];
 
   buildPhase = ''
     runHook preBuild
 
-    sources=$(find main.cc async os net http websocket json sqlite discord gm bot \
-                -name '*.cc' ! -name '*_test.cc')
+    sources=$(find main.cc gm bot -name '*.cc' ! -name '*_test.cc')
+    # Bedrock's static libraries, each before the ones it uses.
+    bedrock="-ldiscord -lwebsocket -lhttp -lnet -los -lasync -ljson -lsqlite"
     # The pkg-config names of the libraries the bot uses. Abseil has one per
     # component.
     libraries="absl_flags absl_flags_parse absl_log absl_log_flags
@@ -67,7 +54,7 @@ stdenv.mkDerivation {
     # The flags mirror .bazelrc: C++20, no exceptions.
     $CXX -std=c++20 -O2 -fno-exceptions \
       -Wno-coroutine-missing-unhandled-exception \
-      -I. $sources -o gm-bot \
+      -I. $sources -o gm-bot $bedrock \
       $(pkg-config --cflags --libs $libraries)
 
     runHook postBuild

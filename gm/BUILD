@@ -22,8 +22,8 @@ cc_library(
         "report.h",
     ],
     deps = [
-        "//sqlite:database",
         "@abseil-cpp",
+        "@bedrock//:sqlite",
     ],
 )
 
@@ -34,9 +34,9 @@ cc_library(
         srcs = [name + ".cc"],
         deps = [
             ":gm",
-            "//sqlite:database",
-            "//testing:main",
             "@abseil-cpp",
+            "@bedrock//:sqlite",
+            "@bedrock//:testing_main",
             "@gbenchmark",
             "@gtest",
         ],

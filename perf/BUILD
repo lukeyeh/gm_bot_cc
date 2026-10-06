@@ -29,16 +29,14 @@ cc_library(
     hdrs = ["load.h"],
     deps = [
         ":histogram",
-        "//async:status_macros",
-        "//async:task",
         "//bot",
-        "//discord",
         "//gm",
-        "//http",
-        "//net",
-        "//net:event_loop",
-        "//websocket",
         "@abseil-cpp",
+        "@bedrock//:async",
+        "@bedrock//:discord",
+        "@bedrock//:http",
+        "@bedrock//:net",
+        "@bedrock//:websocket",
     ],
 )
 
@@ -48,7 +46,7 @@ cc_test(
     srcs = ["histogram_test.cc"],
     deps = [
         ":histogram",
-        "//testing:main",
+        "@bedrock//:testing_main",
         "@gbenchmark",
         "@gtest",
     ],
@@ -60,8 +58,8 @@ cc_test(
     srcs = ["load_test.cc"],
     deps = [
         ":load",
-        "//testing:main",
         "@abseil-cpp",
+        "@bedrock//:testing_main",
         "@gbenchmark",
         "@gtest",
     ],

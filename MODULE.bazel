@@ -17,7 +17,7 @@ use_repo(nix_repo, "nixpkgs")
 
 # One external repository per library, each holding a single cc_library named
 # after it. Depend on them as "@abseil-cpp", "@liburing", "@openssl", "@sqlite", "@gtest"
-# and "@gbenchmark".
+# and "@gbenchmark". Bedrock, below, expects them under exactly these names.
 #
 # The BUILD files below load rules_cc by its canonical name, "@@rules_cc+",
 # because they are evaluated inside repositories that rules_nixpkgs creates,
@@ -188,7 +188,24 @@ cc_library(
     file_deps = ["//nix:deps.nix"],
     repo = "@nixpkgs",
 )
-use_repo(nix_pkg, "abseil-cpp", "fuzztest", "gbenchmark", "gtest", "liburing", "openssl", "sqlite")
+
+# Bedrock: the libraries the bot is built on (async, os, net, http, websocket,
+# json, sqlite, discord, and the main function of the tests), from
+# https://github.com/lukeyeh/bedrock at the revision flake.lock pins. Its
+# package brings its own BUILD file, with one library per directory: depend
+# on "@bedrock//:net", "@bedrock//:discord" and so on, and include their
+# headers as "net/stream.h".
+nix_pkg.file(
+    name = "bedrock",
+    attr = "bedrock",
+    file = "//nix:bazel.nix",
+    file_deps = [
+        "//:flake.lock",
+        "//nix:deps.nix",
+    ],
+    repo = "@nixpkgs",
+)
+use_repo(nix_pkg, "abseil-cpp", "bedrock", "fuzztest", "gbenchmark", "gtest", "liburing", "openssl", "sqlite")
 
 # Generates compile_commands.json for clangd: `bazel run :compile_commands`
 # https://github.com/wolfd/bazel-compile-commands
