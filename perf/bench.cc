@@ -15,6 +15,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "perf/load.h"
 
 ABSL_FLAG(int, events, 2000, "How many events each run sends");
@@ -63,5 +64,16 @@ int main(int argc, char** argv) {
   Report("websocket, paced", RunWebSocketLoad(paced));
   Report("bot, flat out", RunBotLoad(flat_out));
   Report("bot, paced", RunBotLoad(paced));
+
+  // The bot as several copies, one to a thread, as shards of it would run.
+  for (const int threads : {2, 4, 8}) {
+    LoadOptions shards = flat_out;
+    shards.threads = threads;
+    Report(absl::StrCat("bot x", threads, ", one ledger"), RunBotLoad(shards));
+
+    shards.shared_ledger = false;
+    Report(absl::StrCat("bot x", threads, ", a ledger each"),
+           RunBotLoad(shards));
+  }
   return 0;
 }

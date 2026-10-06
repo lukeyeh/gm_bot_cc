@@ -31,6 +31,18 @@ struct LoadOptions {
   // starts. More of either means more for the ledger to look through.
   int members = 200;
   int history_days = 0;
+
+  // For the bot only: how many copies of it run at once, each on a thread
+  // and event loop of its own, with its own connection to the gateway and
+  // its own server's worth of events, the way a bot split into shards would
+  // run one shard per core. Each copy is sent `events` events.
+  int threads = 1;
+
+  // Whether those copies keep one ledger file between them, each with its
+  // own connection to it, or a file each. A file each is not how the bot
+  // would be run; it shows what the copies would do if the ledger were not
+  // something they had to take turns at.
+  bool shared_ledger = true;
 };
 
 struct LoadResult {
@@ -59,6 +71,10 @@ absl::StatusOr<LoadResult> RunWebSocketLoad(const LoadOptions& options);
 // production; only Discord's HTTP API is absent, answered from memory. An
 // event is dealt with when the bot makes the API call that answers it: the
 // reaction to a message, or the reply to a command.
+//
+// With more than one thread the result is of all the copies together: every
+// event any of them dealt with, over the time from the first being sent to
+// the last being dealt with.
 absl::StatusOr<LoadResult> RunBotLoad(const LoadOptions& options);
 
 #endif  // PERF_LOAD_H_

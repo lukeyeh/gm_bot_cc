@@ -40,9 +40,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// The channel and server the bot's events happen in.
+// The channel the bot's events happen in, and the server of the first copy
+// of the bot. Each further copy serves the next server along.
 constexpr uint64_t kChannel = 22;
-constexpr uint64_t kGuild = 33;
+constexpr uint64_t kFirstGuild = 33;
 
 int64_t NowNanoseconds() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -177,7 +178,8 @@ std::string UrlOf(const net::Listener& listener) {
 
 // A message event numbered `sequence`, of the size Discord really sends.
 std::string MessageEvent(int64_t sequence, uint64_t author,
-                         std::string_view content) {
+                         std::string_view content,
+                         uint64_t guild = kFirstGuild) {
   return absl::StrCat(
       R"({"t":"MESSAGE_CREATE","s":)", sequence,
       R"(,"op":0,"d":{"type":0,"tts":false,)"
@@ -197,16 +199,16 @@ std::string MessageEvent(int64_t sequence, uint64_t author,
       R"("clan":null,"avatar_decoration_data":null,)"
       R"("avatar":"8e1f9d0c2b3a4d5e6f708192a3b4c5d6"},"attachments":[],)"
       R"("guild_id":")",
-      kGuild, R"("}})");
+      guild, R"("}})");
 }
 
 // Someone using the command called `name`.
 std::string CommandEvent(int64_t sequence, uint64_t author,
-                         std::string_view name) {
+                         std::string_view name, uint64_t guild) {
   return absl::StrCat(R"({"t":"INTERACTION_CREATE","s":)", sequence,
                       R"(,"op":0,"d":{"type":2,"id":")", sequence,
                       R"(","token":"token-)", sequence, R"(","channel_id":")",
-                      kChannel, R"(","guild_id":")", kGuild,
+                      kChannel, R"(","guild_id":")", guild,
                       R"(","data":{"name":")", name,
                       R"(","options":[]},"member":{"user":{"id":")", author,
                       R"(","username":"member)", author, R"("}}}})");
@@ -215,7 +217,7 @@ std::string CommandEvent(int64_t sequence, uint64_t author,
 // A morning in a busy GM channel: nine events in ten are someone saying GM
 // one way or another, and the rest are split between people saying something
 // else and people asking how they are doing.
-std::vector<std::string> Morning(const LoadOptions& options) {
+std::vector<std::string> Morning(const LoadOptions& options, uint64_t guild) {
   std::mt19937 random(20261005);  // The same morning every time.
   std::uniform_int_distribution<uint64_t> member(1, options.members);
   std::uniform_int_distribution<int> kind(0, 99);
@@ -229,17 +231,17 @@ std::vector<std::string> Morning(const LoadOptions& options) {
     const int roll = kind(random);
 
     if (roll < 60) {
-      events.push_back(MessageEvent(sequence, who, "gm"));
+      events.push_back(MessageEvent(sequence, who, "gm", guild));
     } else if (roll < 90) {
-      events.push_back(
-          MessageEvent(sequence, who, "Good morning everyone, coffee time"));
+      events.push_back(MessageEvent(
+          sequence, who, "Good morning everyone, coffee time", guild));
     } else if (roll < 95) {
       events.push_back(
-          MessageEvent(sequence, who, "did anyone watch the game"));
+          MessageEvent(sequence, who, "did anyone watch the game", guild));
     } else if (roll < 98) {
-      events.push_back(CommandEvent(sequence, who, "streak"));
+      events.push_back(CommandEvent(sequence, who, "streak", guild));
     } else {
-      events.push_back(CommandEvent(sequence, who, "leaderboard"));
+      events.push_back(CommandEvent(sequence, who, "leaderboard", guild));
     }
   }
   return events;
@@ -259,9 +261,12 @@ std::vector<std::string> SessionStart() {
 // notes how long each event waited for the call that answers it.
 class AnsweringApi final : public http::Client {
  public:
-  AnsweringApi(std::string gateway_url, const SendTimes* sent,
+  AnsweringApi(std::string gateway_url, uint64_t guild, const SendTimes* sent,
                LoadResult* result)
-      : gateway_url_(std::move(gateway_url)), sent_(sent), result_(result) {}
+      : gateway_url_(std::move(gateway_url)),
+        guild_(guild),
+        sent_(sent),
+        result_(result) {}
 
   Task<absl::StatusOr<http::Response>> Send(
       const http::Request& request) override {
@@ -276,7 +281,7 @@ class AnsweringApi final : public http::Client {
     if (request.method == http::Method::kGet) {
       co_return http::Response{
           .status = 200,
-          .body = absl::StrCat(R"({"guild_id":")", kGuild, R"("})"),
+          .body = absl::StrCat(R"({"guild_id":")", guild_, R"("})"),
       };
     }
 
@@ -306,6 +311,7 @@ class AnsweringApi final : public http::Client {
   }
 
   std::string gateway_url_;
+  uint64_t guild_;
   const SendTimes* sent_;
   LoadResult* result_;
 };
@@ -331,14 +337,15 @@ Task<absl::Status> ReceiveAll(std::string url, size_t events,
   co_return absl::OkStatus();
 }
 
-Task<absl::Status> ServeUntilTurnedAway(std::string url, bot::Config config,
-                                        gm::Ledger& ledger,
+Task<absl::Status> ServeUntilTurnedAway(std::string url, uint64_t guild,
+                                        bot::Config config, gm::Ledger& ledger,
                                         const SendTimes& sent,
                                         LoadResult& result) {
   CO_ASSIGN_OR_RETURN(
       discord::Client client,
       co_await discord::Client::Connect(
-          config.token, std::make_unique<AnsweringApi>(url, &sent, &result),
+          config.token,
+          std::make_unique<AnsweringApi>(url, guild, &sent, &result),
           &websocket::Connect));
 
   // The server ends the test by closing as Discord does on a bad token.
@@ -349,8 +356,9 @@ Task<absl::Status> ServeUntilTurnedAway(std::string url, bot::Config config,
 
 // Gives each member `days` days of GMs up to yesterday, so that the ledger
 // has something to look through.
-absl::Status GiveHistory(gm::Ledger& ledger, int members, int days) {
-  gm::Community community = ledger.community(kGuild);
+absl::Status GiveHistory(gm::Ledger& ledger, uint64_t guild, int members,
+                         int days) {
+  gm::Community community = ledger.community(guild);
   const absl::CivilDay today =
       absl::ToCivilDay(absl::Now(), absl::UTCTimeZone());
 
@@ -367,6 +375,41 @@ absl::Status GiveHistory(gm::Ledger& ledger, int members, int days) {
     }
   }
   return absl::OkStatus();
+}
+
+// One copy of the bot under load: the server it serves, the gateway that
+// sends it events, and what came of it.
+struct Copy {
+  uint64_t guild = 0;
+  std::filesystem::path ledger_file;
+  std::vector<std::string> events;
+  std::unique_ptr<SendTimes> sent;
+  LoadResult result;
+  absl::Status outcome;
+};
+
+// Runs one copy of the bot against a gateway of its own, on this thread,
+// until the gateway has sent everything.
+absl::Status RunCopy(const LoadOptions& options, Copy& copy) {
+  ABSL_ASSIGN_OR_RETURN(gm::Ledger ledger, gm::Ledger::Open(copy.ledger_file));
+  ABSL_ASSIGN_OR_RETURN(const net::Listener listener,
+                        net::Listener::OnLoopback());
+  ABSL_ASSIGN_OR_RETURN(EventLoop loop, EventLoop::Create());
+
+  const GatewayThread server(listener, SessionStart(), std::move(copy.events),
+                             options.interval, *copy.sent);
+  return loop.Run(ServeUntilTurnedAway(UrlOf(listener), copy.guild,
+                                       bot::Config{
+                                           .token = "load-test",
+                                           .channels =
+                                               {
+                                                   discord::ChannelId{
+                                                       .value = kChannel,
+                                                   },
+                                               },
+                                           .time_zone = absl::UTCTimeZone(),
+                                       },
+                                       ledger, *copy.sent, copy.result));
 }
 
 }  // namespace
@@ -393,43 +436,50 @@ absl::StatusOr<LoadResult> RunWebSocketLoad(const LoadOptions& options) {
 }
 
 absl::StatusOr<LoadResult> RunBotLoad(const LoadOptions& options) {
-  // A ledger on disk, as the bot has in production.
+  // Ledgers on disk, as the bot has in production.
   const std::filesystem::path directory =
       std::filesystem::temp_directory_path() /
       absl::StrCat("gm_bot_load_", NowNanoseconds());
   std::filesystem::create_directories(directory);
-  LoadResult result;
-  absl::Status outcome;
-  {
+
+  std::vector<Copy> copies(static_cast<size_t>(options.threads));
+  for (size_t i = 0; i < copies.size(); ++i) {
+    Copy& copy = copies[i];
+    copy.guild = kFirstGuild + i;
+    copy.ledger_file =
+        directory / (options.shared_ledger ? std::string("gm.db")
+                                           : absl::StrCat("gm-", i, ".db"));
+    copy.events = Morning(options, copy.guild);
+    copy.sent = std::make_unique<SendTimes>(copy.events.size());
+
     ABSL_ASSIGN_OR_RETURN(gm::Ledger ledger,
-                          gm::Ledger::Open(directory / "gm.db"));
+                          gm::Ledger::Open(copy.ledger_file));
     ABSL_RETURN_IF_ERROR(
-        GiveHistory(ledger, options.members, options.history_days));
-
-    ABSL_ASSIGN_OR_RETURN(const net::Listener listener,
-                          net::Listener::OnLoopback());
-    std::vector<std::string> events = Morning(options);
-    SendTimes sent(events.size());
-
-    ABSL_ASSIGN_OR_RETURN(EventLoop loop, EventLoop::Create());
-    const GatewayThread server(listener, SessionStart(), std::move(events),
-                               options.interval, sent);
-    outcome =
-        loop.Run(ServeUntilTurnedAway(UrlOf(listener),
-                                      bot::Config{
-                                          .token = "load-test",
-                                          .channels =
-                                              {
-                                                  discord::ChannelId{
-                                                      .value = kChannel,
-                                                  },
-                                              },
-                                          .time_zone = absl::UTCTimeZone(),
-                                      },
-                                      ledger, sent, result));
+        GiveHistory(ledger, copy.guild, options.members, options.history_days));
   }
+
+  const int64_t started = NowNanoseconds();
+  {
+    std::vector<std::jthread> threads;
+    threads.reserve(copies.size());
+    for (Copy& copy : copies) {
+      threads.emplace_back(
+          [&options, &copy] { copy.outcome = RunCopy(options, copy); });
+    }
+  }
+  const int64_t finished = NowNanoseconds();
   std::filesystem::remove_all(directory);
 
-  ABSL_RETURN_IF_ERROR(outcome);
-  return result;
+  LoadResult total;
+  for (const Copy& copy : copies) {
+    ABSL_RETURN_IF_ERROR(copy.outcome);
+    total.handled += copy.result.handled;
+    total.latency.Merge(copy.result.latency);
+  }
+  // One copy is timed as it always was, from its first event being sent.
+  // Several are timed from when they were all started.
+  total.elapsed = copies.size() == 1
+                      ? copies.front().result.elapsed
+                      : std::chrono::nanoseconds(finished - started);
+  return total;
 }
