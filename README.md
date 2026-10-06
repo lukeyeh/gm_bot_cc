@@ -15,8 +15,11 @@ saying GM and nothing else:
 - Someone says a GM phrase there: `gm`, `good morning` or `morning` to begin
   with, and whatever the server's admins make of the list after that. The
   bot reacts with 🌅, records it, and speaks up when there is something to
-  say: a streak starting, a personal record, a whole week, a round number,
-  or a GM that was already counted today.
+  say: a badge won, a streak starting, a personal record, a whole week, a
+  round number, or a GM that was already counted today.
+- Someone says a GM phrase at an hour when that phrase does not count (see
+  `/gmadd`). The bot reacts with ⏰ and says when it does count. Nothing is
+  recorded and nothing is lost.
 - Someone says anything else there. The bot reacts with 👎, resets their
   streak to zero, and tells them so. Their next GM starts a new one.
 
@@ -26,10 +29,22 @@ anywhere in a server that has a GM channel:
 | Command | Answer |
 | --- | --- |
 | `/leaderboard [limit]` | The standings: longest live streak first. Shows 10 people unless told otherwise, 25 at most. |
-| `/streak` | Your own streak, and your best if it was longer. |
-| `/gmlist` | The phrases that count as a GM. |
-| `/gmadd <phrase>` | Makes a phrase count. For administrators, unless the server's settings say otherwise. |
+| `/streak` | Your own streak, your best if it was longer, and the badges you hold. |
+| `/badges` | Every badge, which of them you hold, and what the rest take. |
+| `/gmlist` | The phrases that count as a GM, and the hours of any that are limited. |
+| `/gmadd <phrase> [time_range]` | Makes a phrase count: all day, or only during hours given like `5-12`. For administrators, unless the server's settings say otherwise. |
 | `/gmremove <phrase>` | Stops a phrase counting. Likewise. |
+
+There are eleven badges, from 🌱 Sprout for a 3-day streak to ☀️ Year-Round
+Sun for 365. A badge is won when a member's best streak reaches its length,
+and kept when the streak ends. Nothing about badges is stored: which ones
+someone holds follows from their best streak, which the ledger already works
+out, so they cost a GM no extra query.
+
+A phrase's hours are on a 24-hour clock in the bot's time zone (`TIMEZONE`),
+from the start of the first hour to the start of the second: `5-12` is five
+in the morning until noon, and `22-2` runs past midnight. To change a
+phrase's hours, remove it and add it again.
 
 A phrase counts in any capitalisation, on its own or at the start or end of a
 longer message. One can be up to 50 characters, on one line, without
@@ -150,12 +165,15 @@ and each test says what behaviour it shows.
   `websocket::FakeServer`, which script the other side.
 - **Both I/O backends.** `bazel test --config=epoll //...` runs everything on
   epoll instead of io_uring.
-- **A fuzz test for the ledger.** `gm/ledger_fuzz_test.cc`, using
+- **Fuzz tests against models.** `gm/ledger_fuzz_test.cc`, using
   [FuzzTest](https://github.com/google/fuzztest), gives the ledger and a
   deliberately simple model of it the same arbitrary sequence of GMs,
-  forfeits and phrase changes across two communities, and requires them to
-  agree on every answer. It found a real bug within a second of first
-  running.
+  forfeits, phrase changes and messages written at some hour, across two
+  communities, and requires them to agree on every answer. The model keeps
+  a phrase's hours as the set of hours found by going round the clock.
+  `gm/badge_fuzz_test.cc` checks badges against a model that keeps counters
+  and a set of badges held, the way the Python bot did. The ledger's test
+  found a real bug within a second of first running.
 
 ## Compared with the original Python bot
 
@@ -172,7 +190,7 @@ discord.py with a JSON file for storage. Measured on the same machine:
 | Memory | 61 MB before connecting | 21 MB connected and running |
 | Read one streak | 0.16 µs | 11–41 µs |
 | Leaderboard, 50 users | 7.9 µs | 1.9 ms |
-| Automated tests | none | 281, plus a fuzz test |
+| Automated tests | none | 321, plus five fuzz properties checked against models |
 
 - **Writes** are where the difference is, and it grows with the server: the
   Python bot rewrites its whole file on every GM, this one touches a few
@@ -195,11 +213,19 @@ It also behaves differently in a few ways, on purpose:
   `GM_CHANNEL_IDS`.
 - Phrases match in any capitalisation, so `GM` counts.
 - A streak that has lapsed reads as zero straight away.
+- A message that says several phrases is a GM if any of them counts at that
+  hour. The Python bot went by whichever phrase it came to first.
+- A phrase said outside its hours costs nothing, but anything that is not a
+  phrase at all still costs the streak.
+- Hours from an hour round to the same hour (`5-5`) mean all day; in the
+  Python bot they meant never.
+- A badge is announced once, when it is won. The Python bot announced it
+  again each time a later streak passed the same length.
 - Command answers are plain text rather than embeds, and name people without
   notifying them.
 
-Not carried over yet: time windows on phrases, the weekly leaderboard post,
-badges, `/resetall`, `/gmhelp`, and an importer for the old `gm_data.json`.
+Not carried over yet: the weekly leaderboard post,
+`/resetall`, `/gmhelp`, and an importer for the old `gm_data.json`.
 
 ## Running it
 
@@ -246,6 +272,7 @@ contents of `.env`, so `bazel run //:gm_bot` is all there is to type.
 | Run one test file's benchmarks | `bazel run -c opt //gm:ledger_test -- --benchmark_filter=all` |
 | Run the load tests | `bazel run -c opt //perf:bench` |
 | Fuzz the ledger for a minute | `bazel run --config=fuzz //gm:ledger_fuzz_test -- --fuzz=LedgerFuzzTest.AgreesWithTheModel --fuzz_for=60s` |
+| Fuzz the badges for a minute | `bazel run --config=fuzz //gm:badge_fuzz_test -- --fuzz=BadgeFuzzTest.AwardsWhatACounterWould --fuzz_for=60s` |
 | Generate `compile_commands.json` for clangd | `bazel run :compile_commands` |
 | Format | `clang-format -i main.cc */*.cc */*.h` and `buildifier -r .` |
 | Lint | `clang-tidy main.cc */*.cc` (after generating compile commands) |

@@ -17,9 +17,11 @@
 
 #include "absl/log/absl_check.h"
 #include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/time/civil_time.h"
+#include "gm/phrase.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "sqlite/database.h"
@@ -59,6 +61,17 @@ Receipt Gm(Community community, const Member& member,
   const absl::StatusOr<Receipt> receipt = community.Record(member, day);
   ABSL_CHECK_OK(receipt);
   return *receipt;
+}
+
+// The texts of the phrases that count in `community`, in order.
+absl::StatusOr<std::vector<std::string>> PhraseTexts(Community community) {
+  ABSL_ASSIGN_OR_RETURN(const std::vector<gm::Phrase> phrases,
+                        community.Phrases());
+
+  std::vector<std::string> texts;
+  texts.reserve(phrases.size());
+  for (const gm::Phrase& phrase : phrases) texts.push_back(phrase.text);
+  return texts;
 }
 
 // The heart of it: a GM on each consecutive day extends the streak by one.
@@ -157,6 +170,28 @@ TEST(LedgerTest, AGmDoesNotCountBeforeItsDay) {
       here.StandingOf(kLuke.id, October(10));
   ABSL_ASSERT_OK(midway);
   EXPECT_EQ(midway->streak, 1);
+}
+
+// A receipt says what the best streak was before the GM as well as after, so
+// that whoever reads it can tell what the GM achieved.
+TEST(LedgerTest, ReceiptSaysWhatTheBestWasBefore) {
+  Ledger ledger = NewLedger();
+  const Community here = ledger.community(kHere);
+
+  // A first streak raises the best with every GM.
+  EXPECT_EQ(Gm(here, kLuke, October(1)).best_before, 0);
+  EXPECT_EQ(Gm(here, kLuke, October(2)).best_before, 1);
+  const Receipt third = Gm(here, kLuke, October(3));
+  EXPECT_EQ(third.best_before, 2);
+  EXPECT_EQ(third.standing.best, 3);
+
+  // A repeat changes nothing, so before and after are the same.
+  EXPECT_EQ(Gm(here, kLuke, October(3)).best_before, 3);
+
+  // A later, shorter streak leaves the best where it was.
+  const Receipt restart = Gm(here, kLuke, October(10));
+  EXPECT_EQ(restart.best_before, 3);
+  EXPECT_EQ(restart.standing.best, 3);
 }
 
 // A forfeit ends the live streak on the spot, and says how much was lost.
@@ -386,9 +421,9 @@ TEST(LedgerTest, CommunitiesAreSeparate) {
 
   // So does a change to the phrases.
   ABSL_ASSERT_OK(elsewhere.AddPhrase("yo"));
-  EXPECT_THAT(here.Phrases(),
+  EXPECT_THAT(PhraseTexts(here),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
-  EXPECT_THAT(elsewhere.Phrases(),
+  EXPECT_THAT(PhraseTexts(elsewhere),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning", "yo")));
 
   // And someone who has only said GM elsewhere is not on the board here.
@@ -403,13 +438,13 @@ TEST(LedgerTest, CommunitiesAreSeparate) {
 TEST(LedgerTest, KeepsTheListOfPhrases) {
   Ledger ledger = NewLedger();
   Community here = ledger.community(kHere);
-  EXPECT_THAT(here.Phrases(),
+  EXPECT_THAT(PhraseTexts(here),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
 
   EXPECT_THAT(here.AddPhrase("yo"), IsOkAndHolds(true));
   EXPECT_THAT(here.RemovePhrase("morning"), IsOkAndHolds(true));
 
-  EXPECT_THAT(here.Phrases(),
+  EXPECT_THAT(PhraseTexts(here),
               IsOkAndHolds(ElementsAre("gm", "good morning", "yo")));
 }
 
@@ -439,8 +474,91 @@ TEST(LedgerTest, RefusesUnacceptablePhrases) {
               StatusIs(absl::StatusCode::kInvalidArgument));
   EXPECT_THAT(here.RemovePhrase(""), IsOkAndHolds(false));
 
-  EXPECT_THAT(here.Phrases(),
+  EXPECT_THAT(PhraseTexts(here),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
+}
+
+// A phrase can be added to count only during some hours of the day, which
+// the ledger keeps with it. The rest count all day.
+TEST(LedgerTest, KeepsTheHoursOfAPhrase) {
+  Ledger ledger = NewLedger();
+  Community here = ledger.community(kHere);
+  const gm::Hours evenings = gm::Hours::Between(18, 23).value();
+
+  EXPECT_THAT(here.AddPhrase("good evening", evenings), IsOkAndHolds(true));
+
+  EXPECT_THAT(here.Phrases(), IsOkAndHolds(ElementsAre(
+                                  gm::Phrase{
+                                      .text = "gm",
+                                  },
+                                  gm::Phrase{
+                                      .text = "good evening",
+                                      .hours = evenings,
+                                  },
+                                  gm::Phrase{
+                                      .text = "good morning",
+                                  },
+                                  gm::Phrase{
+                                      .text = "morning",
+                                  })));
+}
+
+// Adding a phrase that is there already changes nothing, its hours included.
+// To change them, remove it and add it again.
+TEST(LedgerTest, AddingAPhraseAgainLeavesItsHoursAlone) {
+  Ledger ledger = NewLedger();
+  Community here = ledger.community(kHere);
+  const gm::Hours mornings = gm::Hours::Between(5, 12).value();
+
+  EXPECT_THAT(here.AddPhrase("gm", mornings), IsOkAndHolds(false));
+  absl::StatusOr<std::vector<gm::Phrase>> phrases = here.Phrases();
+  ABSL_ASSERT_OK(phrases);
+  EXPECT_TRUE(phrases->front().hours.all_day());
+
+  EXPECT_THAT(here.RemovePhrase("gm"), IsOkAndHolds(true));
+  EXPECT_THAT(here.AddPhrase("gm", mornings), IsOkAndHolds(true));
+  phrases = here.Phrases();
+  ABSL_ASSERT_OK(phrases);
+  EXPECT_EQ(phrases->front().hours, mornings);
+}
+
+// A file from before phrases had hours is brought up to date, with its
+// phrases counting all day as they did.
+TEST(LedgerTest, UpgradesAFileFromBeforeHours) {
+  const std::filesystem::path file =
+      std::filesystem::path(std::getenv("TEST_TMPDIR")) / "no_hours.db";
+  {
+    absl::StatusOr<sqlite::Database> old = sqlite::Database::Open(file);
+    ABSL_ASSERT_OK(old);
+    ABSL_ASSERT_OK(
+        old->Execute("CREATE TABLE communities (id INTEGER PRIMARY KEY)"));
+    ABSL_ASSERT_OK(old->Execute(
+        "CREATE TABLE members (community INTEGER NOT NULL, id INTEGER NOT NULL,"
+        " name TEXT NOT NULL, life INTEGER NOT NULL DEFAULT 0,"
+        " PRIMARY KEY (community, id)) WITHOUT ROWID"));
+    ABSL_ASSERT_OK(old->Execute(
+        "CREATE TABLE gms (community INTEGER NOT NULL,"
+        " member_id INTEGER NOT NULL, life INTEGER NOT NULL, day TEXT NOT NULL,"
+        " PRIMARY KEY (community, member_id, life, day)) WITHOUT ROWID"));
+    ABSL_ASSERT_OK(
+        old->Execute("CREATE TABLE phrases (community INTEGER NOT NULL, phrase "
+                     "TEXT NOT NULL,"
+                     " PRIMARY KEY (community, phrase)) WITHOUT ROWID"));
+    ABSL_ASSERT_OK(old->Execute("INSERT INTO communities VALUES (1)"));
+    ABSL_ASSERT_OK(old->Execute("INSERT INTO phrases VALUES (1, 'yo')"));
+    ABSL_ASSERT_OK(old->Execute("PRAGMA user_version = 4"));
+  }
+
+  absl::StatusOr<Ledger> ledger = Ledger::Open(file);
+  ABSL_ASSERT_OK(ledger);
+  Community community = ledger->community(1);
+
+  EXPECT_THAT(community.Phrases(), IsOkAndHolds(ElementsAre(gm::Phrase{
+                                       .text = "yo",
+                                   })));
+  // And hours can be given from now on.
+  EXPECT_THAT(community.AddPhrase("gn", gm::Hours::Between(22, 2).value()),
+              IsOkAndHolds(true));
 }
 
 // Even the last phrase can go, leaving nothing that counts.
@@ -451,7 +569,7 @@ TEST(LedgerTest, EveryPhraseCanBeRemoved) {
     EXPECT_THAT(here.RemovePhrase(phrase), IsOkAndHolds(true));
   }
 
-  EXPECT_THAT(here.Phrases(), IsOkAndHolds(testing::IsEmpty()));
+  EXPECT_THAT(PhraseTexts(here), IsOkAndHolds(testing::IsEmpty()));
 }
 
 // A ledger file from before forfeits existed is brought up to date when it is
@@ -485,7 +603,7 @@ TEST(LedgerTest, UpgradesAFileFromBeforeForfeits) {
   EXPECT_THAT(ledger->community(kHere).Forfeit(kLuke.id, October(3)),
               IsOkAndHolds(3));
   // The phrases that were built in then are the list it starts with.
-  EXPECT_THAT(ledger->community(kHere).Phrases(),
+  EXPECT_THAT(PhraseTexts(ledger->community(kHere)),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
 }
 
@@ -512,7 +630,7 @@ TEST(LedgerTest, UpgradesAFileFromBeforePhrasesAndKeepsLaterChanges) {
     absl::StatusOr<Ledger> ledger = Ledger::Open(file);
     ABSL_ASSERT_OK(ledger);
     ABSL_ASSERT_OK(ledger->ClaimUndivided(kHere));
-    EXPECT_THAT(ledger->community(kHere).Phrases(),
+    EXPECT_THAT(PhraseTexts(ledger->community(kHere)),
                 IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
     ABSL_ASSERT_OK(ledger->community(kHere).AddPhrase("yo"));
 
@@ -523,7 +641,7 @@ TEST(LedgerTest, UpgradesAFileFromBeforePhrasesAndKeepsLaterChanges) {
 
   absl::StatusOr<Ledger> reopened = Ledger::Open(file);
   ABSL_ASSERT_OK(reopened);
-  EXPECT_THAT(reopened->community(kHere).Phrases(),
+  EXPECT_THAT(PhraseTexts(reopened->community(kHere)),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning", "yo")));
 }
 
@@ -578,9 +696,9 @@ TEST(LedgerTest, ClaimingWithNothingUndividedDoesNothing) {
   ABSL_ASSERT_OK(ledger.ClaimUndivided(kElsewhere));
 
   EXPECT_EQ(Gm(here, kLuke, October(2)).standing.streak, 2);
-  EXPECT_THAT(here.Phrases(),
+  EXPECT_THAT(PhraseTexts(here),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning", "yo")));
-  EXPECT_THAT(ledger.community(kElsewhere).Phrases(),
+  EXPECT_THAT(PhraseTexts(ledger.community(kElsewhere)),
               IsOkAndHolds(ElementsAre("gm", "good morning", "morning")));
 }
 
@@ -608,7 +726,7 @@ TEST(LedgerTest, RefusesAFileFromANewerVersion) {
 // clang-format off
 // Results. Written by perf/record_results.py; do not edit by hand.
 //
-//   Date      2026-10-05
+//   Date      2026-10-06
 //   CPU       Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz, 8 cores, L3 12 MiB (1 instance)
 //   Memory    31 GB
 //   Disk      Samsung SSD 990 EVO Plus 4TB (ext4)
@@ -620,17 +738,17 @@ TEST(LedgerTest, RefusesAFileFromANewerVersion) {
 //   -------------------------------------------------------------------------------------
 //   Benchmark                                           Time             CPU   Iterations
 //   -------------------------------------------------------------------------------------
-//   BM_Record/10/30/iterations:200                  22736 ns        22733 ns          200
-//   BM_Record/50/120/iterations:200                 51198 ns        51195 ns          200
-//   BM_RecordAgain/10/30                            17440 ns        17440 ns        23656
-//   BM_RecordAgain/50/120                           51516 ns        51486 ns         8035
-//   BM_StandingOf/10/30                             12087 ns        12086 ns        34441
-//   BM_StandingOf/50/120                            42992 ns        42983 ns         9615
-//   BM_Leaderboard/10/30                           105987 ns       105986 ns         3868
-//   BM_Leaderboard/50/120                         2028554 ns      2028216 ns          208
-//   BM_Phrases                                        969 ns          969 ns       452677
-//   BM_ForfeitThenRecord/10/30/iterations:200      101768 ns       101499 ns          200
-//   BM_ForfeitThenRecord/50/120/iterations:200     171350 ns       171350 ns          200
+//   BM_Record/10/30/iterations:200                  22844 ns        22840 ns          200
+//   BM_Record/50/120/iterations:200                 51604 ns        51602 ns          200
+//   BM_RecordAgain/10/30                            17252 ns        17223 ns        24714
+//   BM_RecordAgain/50/120                           48734 ns        48734 ns         8734
+//   BM_StandingOf/10/30                             11682 ns        11681 ns        35961
+//   BM_StandingOf/50/120                            42483 ns        42479 ns         9833
+//   BM_Leaderboard/10/30                           104995 ns       104983 ns         4007
+//   BM_Leaderboard/50/120                         2015146 ns      2014157 ns          212
+//   BM_Phrases                                       1287 ns         1287 ns       326941
+//   BM_ForfeitThenRecord/10/30/iterations:200      103376 ns       103376 ns          200
+//   BM_ForfeitThenRecord/50/120/iterations:200     170441 ns       170394 ns          200
 // End of results.
 // clang-format on
 

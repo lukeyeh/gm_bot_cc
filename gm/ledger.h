@@ -32,6 +32,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/time/civil_time.h"
+#include "gm/phrase.h"
 #include "sqlite/database.h"
 
 namespace gm {
@@ -63,6 +64,10 @@ struct Receipt {
   bool new_record = false;
   // Their standing as of that day.
   Standing standing;
+  // What their best streak was before this GM. Less than `standing.best` if
+  // this GM is what raised it, which it does by a day at most; otherwise the
+  // same.
+  int best_before = 0;
 };
 
 // One community's part of a ledger: who in it said GM when, and which
@@ -77,14 +82,14 @@ class Community {
   // changes nothing but the name they are known by.
   absl::StatusOr<Receipt> Record(const Member& member, absl::CivilDay day);
 
-  // The phrases that count as a GM, in canonical form (see phrase.h) and
-  // alphabetical order.
-  absl::StatusOr<std::vector<std::string>> Phrases();
+  // The phrases that count as a GM, in alphabetical order.
+  absl::StatusOr<std::vector<Phrase>> Phrases();
 
-  // Adds `phrase`, in any capitalisation, to the phrases that count. Returns
-  // false if it was one already. Fails with InvalidArgument, in words fit to
+  // Adds `phrase`, in any capitalisation, to the phrases that count, during
+  // `hours` of the day. Returns false if it was one already, in which case
+  // its hours stay as they were. Fails with InvalidArgument, in words fit to
   // show whoever proposed it, if it is not acceptable as a phrase.
-  absl::StatusOr<bool> AddPhrase(std::string_view phrase);
+  absl::StatusOr<bool> AddPhrase(std::string_view phrase, Hours hours = {});
 
   // Removes `phrase`, in any capitalisation, from the phrases that count.
   // Returns false if it was not one. The last phrase can be removed, after

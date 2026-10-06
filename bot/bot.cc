@@ -5,9 +5,11 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
+#include "absl/functional/overload.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/status_macros.h"
@@ -74,7 +76,7 @@ Task<absl::Status> HandleIntrusion(discord::Client& client,
                                    gm::Community community,
                                    absl::CivilDay today,
                                    const discord::Message& message,
-                                   std::span<const std::string> phrases) {
+                                   std::span<const gm::Phrase> phrases) {
   CO_ASSIGN_OR_RETURN(const int forfeited,
                       community.Forfeit(message.author.id.value, today));
 
@@ -85,18 +87,42 @@ Task<absl::Status> HandleIntrusion(discord::Client& client,
       gm::Rebuke(forfeited, discord::Mention(message.author.id), phrases));
 }
 
+// Answers a `message` that says `phrase` at an hour when it does not count.
+// Nothing is recorded and nothing is lost: it was a GM, only mistimed.
+Task<absl::Status> HandleOutOfHours(discord::Client& client,
+                                    const Config& config, absl::CivilMinute now,
+                                    const discord::Message& message,
+                                    const gm::Phrase& phrase) {
+  CO_RETURN_IF_ERROR(co_await client.React(message, gm::kOutOfHours));
+
+  co_return co_await client.Send(
+      message.channel,
+      gm::OutOfHoursNotice(phrase, discord::Mention(message.author.id), now,
+                           config.time_zone.name()));
+}
+
 // Handles something a person wrote in the GM channel.
 Task<absl::Status> HandleMessage(discord::Client& client,
                                  gm::Community community, const Config& config,
                                  const discord::Message& message) {
-  const absl::CivilDay today = absl::ToCivilDay(absl::Now(), config.time_zone);
+  const absl::CivilMinute now =
+      absl::ToCivilMinute(absl::Now(), config.time_zone);
+  const absl::CivilDay today(now);
 
   // Read each time, so that a phrase counts from the moment it is added.
-  CO_ASSIGN_OR_RETURN(const std::vector<std::string> phrases,
+  CO_ASSIGN_OR_RETURN(const std::vector<gm::Phrase> phrases,
                       community.Phrases());
 
-  if (gm::IsGm(message.content, phrases)) {
-    co_return co_await HandleGm(client, community, today, message);
+  const gm::Reading reading = gm::Read(message.content, phrases, now.hour());
+  switch (reading.kind) {
+    case gm::Reading::Kind::kGm:
+      co_return co_await HandleGm(client, community, today, message);
+
+    case gm::Reading::Kind::kOutOfHours:
+      co_return co_await HandleOutOfHours(client, config, now, message,
+                                          *reading.phrase);
+
+    case gm::Reading::Kind::kOther: break;
   }
 
   co_return co_await HandleIntrusion(client, community, today, message,
@@ -125,6 +151,10 @@ std::vector<discord::Command> Commands() {
           .description = "Check your current GM streak",
       },
       discord::Command{
+          .name = "badges",
+          .description = "View your GM streak badges",
+      },
+      discord::Command{
           .name = "gmlist",
           .description = "Show what phrases count as GM",
       },
@@ -138,6 +168,14 @@ std::vector<discord::Command> Commands() {
                       .description = "The phrase to add",
                       .type = discord::OptionType::kText,
                       .required = true,
+                  },
+                  discord::Option{
+                      .name = "time_range",
+                      .description =
+                          "When it counts: hours like 5-12, or anytime "
+                          "(the default)",
+                      .type = discord::OptionType::kText,
+                      .required = false,
                   },
               },
           .administrators_only = true,
@@ -163,9 +201,18 @@ std::vector<discord::Command> Commands() {
 Task<absl::Status> HandleGmAdd(discord::Client& client, gm::Community community,
                                const discord::CommandInvoked& command) {
   const std::string proposed = command.Text("phrase");
-  const absl::StatusOr<bool> added = community.AddPhrase(proposed);
+  const std::string time_range = command.Text("time_range");
 
-  // An unacceptable phrase is the user's to hear about, not a failure.
+  // Unacceptable hours, like an unacceptable phrase below, are the user's
+  // to hear about, not a failure.
+  const absl::StatusOr<gm::Hours> hours =
+      time_range.empty() ? gm::Hours() : gm::Hours::Parse(time_range);
+  if (!hours.ok()) {
+    co_return co_await client.Respond(
+        command, absl::StrCat("❌ ", hours.status().message()));
+  }
+
+  const absl::StatusOr<bool> added = community.AddPhrase(proposed, *hours);
   if (absl::IsInvalidArgument(added.status())) {
     co_return co_await client.Respond(
         command, absl::StrCat("❌ ", added.status().message()));
@@ -173,9 +220,13 @@ Task<absl::Status> HandleGmAdd(discord::Client& client, gm::Community community,
   CO_RETURN_IF_ERROR(added.status());
 
   // Shown as it was stored, which is what will be matched.
-  CO_ASSIGN_OR_RETURN(const std::string phrase, gm::CanonicalPhrase(proposed));
-  co_return co_await client.Respond(command,
-                                    gm::PhraseAddedReport(phrase, *added));
+  CO_ASSIGN_OR_RETURN(std::string text, gm::CanonicalPhrase(proposed));
+  co_return co_await client.Respond(command, gm::PhraseAddedReport(
+                                                 gm::Phrase{
+                                                     .text = std::move(text),
+                                                     .hours = *hours,
+                                                 },
+                                                 *added));
 }
 
 // Answers /gmremove.
@@ -215,8 +266,15 @@ Task<absl::Status> HandleCommand(discord::Client& client,
         command, gm::StreakReport(standing, discord::Mention(command.user.id)));
   }
 
+  if (command.name == "badges") {
+    CO_ASSIGN_OR_RETURN(const gm::Standing standing,
+                        community.StandingOf(command.user.id.value, today));
+
+    co_return co_await client.Respond(command, gm::BadgesReport(standing));
+  }
+
   if (command.name == "gmlist") {
-    CO_ASSIGN_OR_RETURN(const std::vector<std::string> phrases,
+    CO_ASSIGN_OR_RETURN(const std::vector<gm::Phrase> phrases,
                         community.Phrases());
 
     co_return co_await client.Respond(command, gm::PhraseListReport(phrases));
@@ -234,6 +292,37 @@ Task<absl::Status> HandleCommand(discord::Client& client,
   // forget.
   co_return co_await client.Respond(command,
                                     "I don't know that command any more.");
+}
+
+// Deals with a message the bot has been told of, if it is one the bot
+// watches for. A failure is logged and otherwise ignored: one message going
+// wrong is no reason to stop serving. Each server is a community of its own
+// in the ledger.
+Task<> OnMessage(discord::Client& client, gm::Ledger& ledger,
+                 const Config& config, const discord::Message& message) {
+  if (!IsWatched(message, config)) co_return;
+
+  const absl::Status handled = co_await HandleMessage(
+      client, ledger.community(message.guild.value), config, message);
+  if (!handled.ok()) {
+    LOG(ERROR) << "could not handle a message from " << message.author.name
+               << ": " << handled;
+  }
+}
+
+// Deals with someone's use of a command, likewise.
+Task<> OnCommand(discord::Client& client, gm::Ledger& ledger,
+                 const Config& config, const discord::CommandInvoked& command) {
+  // Used in a direct message, there is no community to answer about.
+  const absl::Status handled =
+      command.guild.value == 0
+          ? co_await client.Respond(command, "I only work in a server, sorry.")
+          : co_await HandleCommand(
+                client, ledger.community(command.guild.value), config, command);
+  if (!handled.ok()) {
+    LOG(ERROR) << "could not answer /" << command.name << " from "
+               << command.user.name << ": " << handled;
+  }
 }
 
 // Gets things ready for serving: finds the server of each GM channel, which
@@ -283,32 +372,16 @@ Task<absl::Status> Serve(discord::Client& client, gm::Ledger& ledger,
     CO_ASSIGN_OR_RETURN(const discord::Event event,
                         co_await client.NextEvent());
 
-    // Each server is a community of its own in the ledger.
-    if (const auto* const created =
-            std::get_if<discord::MessageCreated>(&event)) {
-      const discord::Message& message = created->message;
-      if (!IsWatched(message, config)) continue;
-
-      const absl::Status handled = co_await HandleMessage(
-          client, ledger.community(message.guild.value), config, message);
-      if (!handled.ok()) {
-        LOG(ERROR) << "could not handle a message from " << message.author.name
-                   << ": " << handled;
-      }
-    } else if (const auto* const invoked =
-                   std::get_if<discord::CommandInvoked>(&event)) {
-      const absl::Status handled =
-          invoked->guild.value == 0
-              ? co_await client.Respond(*invoked,
-                                        "I only work in a server, sorry.")
-              : co_await HandleCommand(client,
-                                       ledger.community(invoked->guild.value),
-                                       config, *invoked);
-      if (!handled.ok()) {
-        LOG(ERROR) << "could not answer /" << invoked->name << " from "
-                   << invoked->user.name << ": " << handled;
-      }
-    }
+    co_await std::visit(absl::Overload{
+                            [&](const discord::MessageCreated& created) {
+                              return OnMessage(client, ledger, config,
+                                               created.message);
+                            },
+                            [&](const discord::CommandInvoked& invoked) {
+                              return OnCommand(client, ledger, config, invoked);
+                            },
+                        },
+                        event);
   }
 }
 

@@ -6,7 +6,7 @@
 #   perf/benchmarks.sh after "//gm:ledger_test //json:json_test"
 set -euo pipefail
 label=${1:?usage: run_benchmarks.sh <label> [targets]}
-targets=${2:-$(bazel query 'kind(cc_test, //...) except //gm:ledger_fuzz_test' 2>/dev/null)}
+targets=${2:-$(bazel query 'kind(cc_test, //...) except attr(name, "_fuzz_test$", //...)' 2>/dev/null)}
 out=perf-reports/raw/$label
 mkdir -p "$out"
 bazel build -c opt $targets >/dev/null 2>&1

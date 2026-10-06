@@ -8,12 +8,14 @@ package(default_visibility = ["//:__subpackages__"])
 cc_library(
     name = "gm",
     srcs = [
+        "badge.cc",
         "greeting.cc",
         "ledger.cc",
         "phrase.cc",
         "report.cc",
     ],
     hdrs = [
+        "badge.h",
         "greeting.h",
         "ledger.h",
         "phrase.h",
@@ -40,6 +42,7 @@ cc_library(
         ],
     )
     for name in [
+        "badge_test",
         "greeting_test",
         "ledger_test",
         "phrase_test",
@@ -47,17 +50,23 @@ cc_library(
     ]
 ]
 
-# The ledger against a model, on arbitrary sequences of GMs. FuzzTest brings
-# its own main, which is what understands --fuzz.
-cc_test(
-    name = "ledger_fuzz_test",
-    size = "small",
-    srcs = ["ledger_fuzz_test.cc"],
-    deps = [
-        ":gm",
-        "@abseil-cpp",
-        "@fuzztest",
-        "@fuzztest//:main",
-        "@gtest",
-    ],
-)
+# The ledger and the badges, each against a model, on arbitrary sequences of
+# GMs. FuzzTest brings its own main, which is what understands --fuzz.
+[
+    cc_test(
+        name = name,
+        size = "small",
+        srcs = [name + ".cc"],
+        deps = [
+            ":gm",
+            "@abseil-cpp",
+            "@fuzztest",
+            "@fuzztest//:main",
+            "@gtest",
+        ],
+    )
+    for name in [
+        "badge_fuzz_test",
+        "ledger_fuzz_test",
+    ]
+]

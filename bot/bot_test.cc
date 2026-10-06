@@ -16,6 +16,7 @@
 #include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/civil_time.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "async/task.h"
@@ -436,7 +437,7 @@ TEST(BotTest, RegistersItsCommandsInTheGmChannelsServer) {
     EXPECT_EQ(registration.url,
               absl::StrCat(kApi, "/applications/99/guilds/33/commands"));
     for (const char* const command :
-         {"leaderboard", "streak", "gmlist", "gmadd", "gmremove"}) {
+         {"leaderboard", "streak", "badges", "gmlist", "gmadd", "gmremove"}) {
       EXPECT_THAT(registration.body,
                   HasSubstr(absl::StrCat(R"("name":")", command, "\"")));
     }
@@ -595,6 +596,77 @@ TEST(BotTest, AnswersStreak) {
   }());
 }
 
+// /badges shows whoever asks every badge and which they hold. Nobody holds
+// one after a single GM.
+TEST(BotTest, AnswersBadges) {
+  RunOnEventLoop([]() -> Task<> {
+    gm::Ledger ledger = NewLedger();
+
+    const Outcome outcome = co_await ServeEvents(
+        {
+            Dispatch(Said{
+                .sequence = 2,
+                .content = "gm",
+            }),
+            Dispatch(Used{
+                .sequence = 3,
+                .command = "badges",
+            }),
+        },
+        ledger, InChannel22());
+
+    EXPECT_THAT(outcome.actions,
+                ElementsAre(kReactionTo2, HasSubstr("Your streak has started"),
+                            AllOf(HasSubstr("🏅 **GM Streak Badges**"),
+                                  HasSubstr("Your best streak: **1 day**"),
+                                  HasSubstr("🔒 ~~Sprout~~ — 3 days"),
+                                  HasSubstr("Earned: 0/11 badges"))));
+  }());
+}
+
+// The GM that takes a streak to three days wins the first badge, which the
+// bot announces, and /streak shows from then on.
+TEST(BotTest, AnnouncesABadgeWhenItIsWon) {
+  RunOnEventLoop([]() -> Task<> {
+    gm::Ledger ledger = NewLedger();
+
+    // Luke said GM yesterday and the day before.
+    const absl::CivilDay today =
+        absl::ToCivilDay(absl::Now(), absl::UTCTimeZone());
+    gm::Community community = ledger.community(33);
+    for (const int ago : {2, 1}) {
+      ABSL_EXPECT_OK(community.Record(
+          gm::Member{
+              .id = 44,
+              .name = "luke",
+          },
+          today - ago));
+    }
+
+    const Outcome outcome = co_await ServeEvents(
+        {
+            Dispatch(Said{
+                .sequence = 2,
+                .content = "gm",
+            }),
+            Dispatch(Used{
+                .sequence = 3,
+                .command = "streak",
+            }),
+        },
+        ledger, InChannel22());
+
+    EXPECT_THAT(
+        outcome.actions,
+        ElementsAre(kReactionTo2,
+                    HasSubstr("🌱 **NEW BADGE UNLOCKED!** <@44> earned the "
+                              "**Sprout** badge with a **3 day streak!** 🌱"),
+                    Reply(3,
+                          "🔥 <@44>, your current streak is **3 days**!\\n"
+                          "Badges: 🌱")));
+  }());
+}
+
 // /gmlist shows what counts.
 TEST(BotTest, AnswersGmList) {
   RunOnEventLoop([]() -> Task<> {
@@ -640,6 +712,120 @@ TEST(BotTest, AnAddedPhraseCountsAsAGm) {
         outcome.actions,
         ElementsAre(Reply(2, "✅ `yo` now counts as a GM."), kReactionTo3,
                     HasSubstr("Your streak has started")));
+  }());
+}
+
+// /gmadd can limit a phrase to some hours of the day. Said during them it is
+// a GM like any other.
+TEST(BotTest, APhraseWithHoursCountsDuringThem) {
+  RunOnEventLoop([]() -> Task<> {
+    gm::Ledger ledger = NewLedger();
+
+    // Hours that have just begun, so that it stays within them.
+    const int hour = absl::ToCivilHour(absl::Now(), absl::UTCTimeZone()).hour();
+    const std::string hours = absl::StrCat(hour, "-", (hour + 2) % 24);
+
+    const Outcome outcome = co_await ServeEvents(
+        {
+            Dispatch(Used{
+                .sequence = 2,
+                .command = "gmadd",
+                .options =
+                    absl::StrCat(R"([{"name":"phrase","type":3,"value":"yo"},)",
+                                 R"({"name":"time_range","type":3,"value":")",
+                                 hours, R"("}])"),
+            }),
+            Dispatch(Said{
+                .sequence = 3,
+                .content = "yo",
+            }),
+        },
+        ledger, InChannel22());
+
+    EXPECT_THAT(
+        outcome.actions,
+        ElementsAre(
+            Reply(2, absl::StrCat("✅ `yo` now counts as a GM "
+                                  "from ",
+                                  hour, ":00 to ", (hour + 2) % 24, ":00.")),
+            kReactionTo3, HasSubstr("Your streak has started")));
+  }());
+}
+
+// Said outside its hours, the phrase is not counted and its author is told
+// when it would be. It costs them nothing: the streak they had stands.
+TEST(BotTest, APhraseOutsideItsHoursIsNotCountedAndCostsNothing) {
+  RunOnEventLoop([]() -> Task<> {
+    gm::Ledger ledger = NewLedger();
+
+    // Hours that do not begin for a while yet.
+    const int hour = absl::ToCivilHour(absl::Now(), absl::UTCTimeZone()).hour();
+    const std::string hours =
+        absl::StrCat((hour + 2) % 24, "-", (hour + 3) % 24);
+
+    const Outcome outcome = co_await ServeEvents(
+        {
+            Dispatch(Said{
+                .sequence = 2,
+                .content = "gm",
+            }),
+            Dispatch(Used{
+                .sequence = 3,
+                .command = "gmadd",
+                .options =
+                    absl::StrCat(R"([{"name":"phrase","type":3,"value":"yo"},)",
+                                 R"({"name":"time_range","type":3,"value":")",
+                                 hours, R"("}])"),
+            }),
+            Dispatch(Said{
+                .sequence = 4,
+                .content = "yo",
+            }),
+        },
+        ledger, InChannel22());
+
+    EXPECT_THAT(
+        outcome.actions,
+        ElementsAre(kReactionTo2, HasSubstr("Your streak has started"),
+                    AllOf(HasSubstr("/interactions/3/"),
+                          HasSubstr("`yo` now counts as a GM from ")),
+                    "PUT /channels/22/messages/4/reactions/%E2%8F%B0/@me",
+                    AllOf(HasSubstr("⏰ <@44>, `yo` only counts from **"),
+                          HasSubstr("It is now "), HasSubstr("(UTC)"))));
+
+    const absl::StatusOr<gm::Standing> standing =
+        ledger.community(33).StandingOf(
+            44, absl::ToCivilDay(absl::Now(), absl::UTCTimeZone()));
+    ABSL_EXPECT_OK(standing);
+    if (standing.ok()) EXPECT_EQ(standing->streak, 1);
+  }());
+}
+
+// Hours that are not hours are explained, and nothing is added.
+TEST(BotTest, ExplainsHoursItCannotRead) {
+  RunOnEventLoop([]() -> Task<> {
+    gm::Ledger ledger = NewLedger();
+
+    const Outcome outcome = co_await ServeEvents(
+        {
+            Dispatch(Used{
+                .sequence = 2,
+                .command = "gmadd",
+                .options = R"([{"name":"phrase","type":3,"value":"yo"},)"
+                           R"({"name":"time_range","type":3,"value":"dawn"}])",
+            }),
+            Dispatch(Used{
+                .sequence = 3,
+                .command = "gmlist",
+            }),
+        },
+        ledger, InChannel22());
+
+    EXPECT_THAT(outcome.actions,
+                ElementsAre(Reply(2,
+                                  "❌ Give the hours as two numbers, like "
+                                  "`5-12`, or say `anytime`."),
+                            Not(HasSubstr("`yo`"))));
   }());
 }
 
@@ -836,7 +1022,7 @@ TEST(BotTest, StopsWhenDiscordTurnsItAway) {
 // clang-format off
 // Results. Written by perf/record_results.py; do not edit by hand.
 //
-//   Date      2026-10-05
+//   Date      2026-10-06
 //   CPU       Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz, 8 cores, L3 12 MiB (1 instance)
 //   Memory    31 GB
 //   Disk      Samsung SSD 990 EVO Plus 4TB (ext4)
@@ -848,7 +1034,7 @@ TEST(BotTest, StopsWhenDiscordTurnsItAway) {
 //   ----------------------------------------------------------------------
 //   Benchmark            Time             CPU   Iterations UserCounters...
 //   ----------------------------------------------------------------------
-//   BM_ServeGms       6.05 ms         6.05 ms           67 items_per_second=42.3337k/s
+//   BM_ServeGms       6.16 ms         6.16 ms           69 items_per_second=41.553k/s
 // End of results.
 // clang-format on
 

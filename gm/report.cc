@@ -8,7 +8,9 @@
 
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "gm/badge.h"
 #include "gm/ledger.h"
+#include "gm/phrase.h"
 
 namespace gm {
 namespace {
@@ -34,6 +36,18 @@ std::string Literal(std::string_view name) {
   }
 
   return literal;
+}
+
+// A line showing the badges a best streak of `best` days holds, or nothing
+// if it holds none.
+std::string BadgeLine(int best) {
+  const std::span<const Badge> earned = BadgesEarnedBy(best);
+  if (earned.empty()) return "";
+
+  std::string line = "\nBadges:";
+  for (const Badge& badge : earned) absl::StrAppend(&line, " ", badge.emoji);
+
+  return line;
 }
 
 // What marks place `place`, counting from 1: a medal, or the number.
@@ -69,7 +83,7 @@ std::string LeaderboardReport(std::span<const Standing> board) {
   return report;
 }
 
-std::string PhraseListReport(std::span<const std::string> phrases) {
+std::string PhraseListReport(std::span<const Phrase> phrases) {
   std::string report = "✅ **GM phrases**\n";
   if (phrases.empty()) {
     absl::StrAppend(&report,
@@ -78,18 +92,30 @@ std::string PhraseListReport(std::span<const std::string> phrases) {
     return report;
   }
 
-  for (const std::string& phrase : phrases) {
-    absl::StrAppend(&report, "\n• `", phrase, "`");
+  bool any_limited = false;
+  for (const Phrase& phrase : phrases) {
+    absl::StrAppend(&report, "\n• `", phrase.text, "`");
+    if (phrase.hours.all_day()) continue;
+
+    absl::StrAppend(&report, " — ⏰ ", phrase.hours.Describe());
+    any_limited = true;
   }
   absl::StrAppend(&report, "\n\nCapitalisation does not matter.");
+  if (any_limited) absl::StrAppend(&report, " Hours are on a 24-hour clock.");
 
   return report;
 }
 
-std::string PhraseAddedReport(std::string_view phrase, bool added) {
-  if (!added) return absl::StrCat("`", phrase, "` already counts as a GM.");
+std::string PhraseAddedReport(const Phrase& phrase, bool added) {
+  if (!added) {
+    return absl::StrCat("`", phrase.text, "` already counts as a GM.");
+  }
+  if (phrase.hours.all_day()) {
+    return absl::StrCat("✅ `", phrase.text, "` now counts as a GM.");
+  }
 
-  return absl::StrCat("✅ `", phrase, "` now counts as a GM.");
+  return absl::StrCat("✅ `", phrase.text, "` now counts as a GM from ",
+                      phrase.hours.Describe(), ".");
 }
 
 std::string PhraseRemovedReport(std::string_view phrase, bool removed) {
@@ -105,6 +131,8 @@ std::string StreakReport(const Standing& standing, std::string_view mention) {
     if (standing.best > 0) {
       absl::StrAppend(&report, "\nYour best: **", Days(standing.best), "**");
     }
+    absl::StrAppend(&report, BadgeLine(standing.best));
+
     return report;
   }
 
@@ -114,6 +142,31 @@ std::string StreakReport(const Standing& standing, std::string_view mention) {
   if (standing.best > standing.streak) {
     absl::StrAppend(&report, "\nYour best: **", Days(standing.best), "**");
   }
+  absl::StrAppend(&report, BadgeLine(standing.best));
+
+  return report;
+}
+
+std::string BadgesReport(const Standing& standing) {
+  const size_t earned = BadgesEarnedBy(standing.best).size();
+  const std::span<const Badge> all = AllBadges();
+
+  std::string report =
+      absl::StrCat("🏅 **GM Streak Badges**\nYour best streak: **",
+                   Days(standing.best), "**\n");
+  for (size_t i = 0; i < all.size(); ++i) {
+    const Badge& badge = all[i];
+
+    // The easiest `earned` of them are the ones held.
+    if (i < earned) {
+      absl::StrAppend(&report, "\n", badge.emoji, " **", badge.name, "** — ",
+                      badge.days, " days ✅");
+    } else {
+      absl::StrAppend(&report, "\n🔒 ~~", badge.name, "~~ — ", badge.days,
+                      " days");
+    }
+  }
+  absl::StrAppend(&report, "\n\nEarned: ", earned, "/", all.size(), " badges");
 
   return report;
 }

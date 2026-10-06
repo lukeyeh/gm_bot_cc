@@ -36,7 +36,9 @@ namespace {
 //   3  Adds phrases.
 //   4  Adds communities: every table gains a community column, and
 //      communities lists the ones that have been given their phrases.
-constexpr int64_t kLayout = 4;
+//   5  Adds the hours a phrase counts during: phrases.opens and
+//      phrases.closes, both 0 for all day.
+constexpr int64_t kLayout = 5;
 
 // What was recorded before layout 4 belongs to no community until one claims
 // it. No real community has this id.
@@ -154,6 +156,17 @@ absl::Status AddCommunities(sqlite::Database& database) {
                         "DROP TABLE members_3",
                         "DROP TABLE phrases_3",
                     });
+}
+
+// Layout 4 to 5. A phrase counts between two hours of the day; the phrases
+// there already are go on counting all day.
+absl::Status AddHours(sqlite::Database& database) {
+  for (const std::string_view column : {"opens", "closes"}) {
+    ABSL_RETURN_IF_ERROR(
+        database.Execute(absl::StrCat("ALTER TABLE phrases ADD COLUMN ", column,
+                                      " INTEGER NOT NULL DEFAULT 0")));
+  }
+  return absl::OkStatus();
 }
 
 // A standing, plus what is needed to tell whether a record was just broken.
@@ -315,20 +328,28 @@ absl::StatusOr<std::vector<Tally>> Tallies(
   return tallies;
 }
 
-absl::StatusOr<std::vector<std::string>> ReadPhrases(sqlite::Database& database,
-                                                     const int64_t community) {
+absl::StatusOr<std::vector<Phrase>> ReadPhrases(sqlite::Database& database,
+                                                const int64_t community) {
   ABSL_ASSIGN_OR_RETURN(
       const std::vector<sqlite::Row> rows,
-      database.Query(
-          "SELECT phrase FROM phrases WHERE community = ?1 ORDER BY phrase",
-          {
-              community,
-          }));
+      database.Query("SELECT phrase, opens, closes FROM phrases "
+                     "WHERE community = ?1 ORDER BY phrase",
+                     {
+                         community,
+                     }));
 
-  std::vector<std::string> phrases;
+  std::vector<Phrase> phrases;
   phrases.reserve(rows.size());
   for (const sqlite::Row& row : rows) {
-    phrases.emplace_back(row.Text(0));
+    ABSL_ASSIGN_OR_RETURN(const Hours hours,
+                          Hours::Between(static_cast<int>(row.Int(1)),
+                                         static_cast<int>(row.Int(2))),
+                          _.SetPrepend() << "the hours of a stored phrase: ");
+
+    phrases.push_back(Phrase{
+        .text = std::string(row.Text(0)),
+        .hours = hours,
+    });
   }
   return phrases;
 }
@@ -382,6 +403,10 @@ absl::StatusOr<Ledger> Ledger::Prepare(sqlite::Database database) {
     if (layout == 3) {
       ABSL_RETURN_IF_ERROR(AddCommunities(database));
       layout = 4;
+    }
+    if (layout == 4) {
+      ABSL_RETURN_IF_ERROR(AddHours(database));
+      layout = 5;
     }
 
     return database.Execute(absl::StrCat("PRAGMA user_version = ", kLayout));
@@ -500,6 +525,10 @@ absl::StatusOr<Receipt> Community::Record(const Member& member,
         .new_record = !inserted.empty() && tally->earlier_best > 0 &&
                       tally->standing.streak == tally->earlier_best + 1,
         .standing = tally->standing,
+        // Before a GM that counted, the live streak was a day shorter.
+        .best_before =
+            std::max(tally->earlier_best,
+                     tally->standing.streak - (inserted.empty() ? 0 : 1)),
     };
     return absl::OkStatus();
   }));
@@ -526,8 +555,8 @@ absl::StatusOr<Standing> Community::StandingOf(const uint64_t member_id,
   return tally->standing;
 }
 
-absl::StatusOr<std::vector<std::string>> Community::Phrases() {
-  ABSL_ASSIGN_OR_RETURN(std::vector<std::string> phrases,
+absl::StatusOr<std::vector<Phrase>> Community::Phrases() {
+  ABSL_ASSIGN_OR_RETURN(std::vector<Phrase> phrases,
                         ReadPhrases(*database_, id_));
   if (!phrases.empty()) return phrases;
 
@@ -539,7 +568,8 @@ absl::StatusOr<std::vector<std::string>> Community::Phrases() {
   return ReadPhrases(*database_, id_);
 }
 
-absl::StatusOr<bool> Community::AddPhrase(const std::string_view phrase) {
+absl::StatusOr<bool> Community::AddPhrase(const std::string_view phrase,
+                                          const Hours hours) {
   ABSL_ASSIGN_OR_RETURN(const std::string canonical, CanonicalPhrase(phrase));
   ABSL_RETURN_IF_ERROR(Enrol());
 
@@ -547,11 +577,13 @@ absl::StatusOr<bool> Community::AddPhrase(const std::string_view phrase) {
   ABSL_ASSIGN_OR_RETURN(
       const std::vector<sqlite::Row> inserted,
       database_->Query(
-          "INSERT INTO phrases (community, phrase) VALUES (?1, ?2) "
-          "ON CONFLICT DO NOTHING RETURNING 1",
+          "INSERT INTO phrases (community, phrase, opens, closes) "
+          "VALUES (?1, ?2, ?3, ?4) ON CONFLICT DO NOTHING RETURNING 1",
           {
               id_,
               canonical,
+              static_cast<int64_t>(hours.from()),
+              static_cast<int64_t>(hours.until()),
           }));
   return !inserted.empty();
 }

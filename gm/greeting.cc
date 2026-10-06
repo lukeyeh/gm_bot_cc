@@ -9,7 +9,11 @@
 #include <string_view>
 
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/time/civil_time.h"
+#include "gm/badge.h"
 #include "gm/ledger.h"
+#include "gm/phrase.h"
 
 namespace gm {
 namespace {
@@ -33,7 +37,7 @@ std::string Days(const int count) {
 }  // namespace
 
 std::string Rebuke(const int forfeited, const std::string_view mention,
-                   const std::span<const std::string> phrases) {
+                   const std::span<const Phrase> phrases) {
   std::string rebuke =
       absl::StrCat("👎 ", mention, ", only GMs belong in this channel!");
   if (forfeited > 0) {
@@ -52,11 +56,22 @@ std::string Rebuke(const int forfeited, const std::string_view mention,
   for (size_t i = 0; i < phrases.size(); ++i) {
     const std::string_view separator =
         i == 0 ? "" : (i + 1 == phrases.size() ? " or " : ", ");
-    absl::StrAppend(&rebuke, separator, "`", phrases[i], "`");
+    absl::StrAppend(&rebuke, separator, "`", phrases[i].text, "`");
   }
   absl::StrAppend(&rebuke, " to start a new one.");
 
   return rebuke;
+}
+
+std::string OutOfHoursNotice(const Phrase& phrase,
+                             const std::string_view mention,
+                             const absl::CivilMinute now,
+                             const std::string_view time_zone) {
+  return absl::StrCat("⏰ ", mention, ", `", phrase.text,
+                      "` only counts from **", phrase.hours.Describe(),
+                      "**. It is now ",
+                      absl::StrFormat("%d:%02d", now.hour(), now.minute()),
+                      " (", time_zone, ").");
 }
 
 std::optional<std::string> Announcement(const Receipt& receipt,
@@ -67,6 +82,13 @@ std::optional<std::string> Announcement(const Receipt& receipt,
     return absl::StrCat(
         "☀️ ", mention, ", you already said GM today! Your current streak is **",
         Days(streak), "**. Come back tomorrow to keep it going!");
+  }
+
+  if (const Badge* const badge =
+          BadgeNewlyEarned(receipt.best_before, receipt.standing.best)) {
+    return absl::StrCat(badge->emoji, " **NEW BADGE UNLOCKED!** ", mention,
+                        " earned the **", badge->name, "** badge with a **",
+                        streak, " day streak!** ", badge->emoji);
   }
 
   if (receipt.new_record) {
